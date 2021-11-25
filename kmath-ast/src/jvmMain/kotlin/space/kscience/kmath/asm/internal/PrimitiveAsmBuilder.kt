@@ -6,37 +6,49 @@
 package space.kscience.kmath.asm.internal
 
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.FieldVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Opcodes.*
 import org.objectweb.asm.Type
 import org.objectweb.asm.Type.*
 import org.objectweb.asm.commons.InstructionAdapter
-import space.kscience.kmath.expressions.Expression
-import space.kscience.kmath.expressions.MST
-import space.kscience.kmath.expressions.Symbol
-import space.kscience.kmath.expressions.invoke
+import space.kscience.kmath.expressions.*
+import space.kscience.kmath.misc.UnstableKMathAPI
 import space.kscience.kmath.operations.*
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import java.nio.file.Paths
 import kotlin.io.path.writeBytes
 
-internal sealed class PrimitiveAsmBuilder<T : Number>(
+@UnstableKMathAPI
+internal sealed class PrimitiveAsmBuilder<T : Number, E : Expression<T>>(
     protected val algebra: Algebra<T>,
     classOfT: Class<*>,
     protected val classOfTPrimitive: Class<*>,
+    expressionParent: Class<E>,
     protected val target: MST,
 ) : AsmBuilder() {
     private val className: String = buildName(target)
 
     /**
-     * ASM type for [T].
+     * ASM type for [tType].
      */
     private val tType: Type = classOfT.asm
 
     /**
-     * ASM type for [T].
+     * ASM type for [classOfTPrimitive].
      */
     protected val tTypePrimitive: Type = classOfTPrimitive.asm
+
+    /**
+     * ASM type for array of [classOfTPrimitive].
+     */
+    protected val tTypePrimitiveArray: Type = getType("[" + classOfTPrimitive.asm.descriptor)
+
+    /**
+     * ASM type for expression parent.
+     */
+    private val expressionParentType = expressionParent.asm
 
     /**
      * ASM type for new class.
@@ -51,7 +63,7 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
     /**
      * Local variables indices are indices of symbols in this list.
      */
-    private val argumentsLocals = mutableListOf<String>()
+    private val argumentsLocals = mutableListOf<Symbol>()
 
     /**
      * Subclasses, loads and instantiates [Expression] for given parameters.
@@ -59,48 +71,82 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
      * The built instance is cached.
      */
     @Suppress("UNCHECKED_CAST", "UNUSED_VARIABLE")
-    val instance: Expression<T> by lazy {
+    val instance: E by lazy {
         val classWriter = ClassWriter(ClassWriter.COMPUTE_FRAMES) {
             visit(
-                Opcodes.V1_8,
-                Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL or Opcodes.ACC_SUPER,
+                V1_8,
+                ACC_PUBLIC or ACC_FINAL or ACC_SUPER,
                 classType.internalName,
-                "${OBJECT_TYPE.descriptor}L${EXPRESSION_TYPE.internalName}<${tType.descriptor}>;",
+                "${OBJECT_TYPE.descriptor}${expressionParentType.descriptor}",
                 OBJECT_TYPE.internalName,
-                arrayOf(EXPRESSION_TYPE.internalName),
+                arrayOf(expressionParentType.internalName),
+            )
+
+            visitField(
+                access = ACC_PRIVATE or ACC_FINAL,
+                name = "indexer",
+                descriptor = SYMBOL_INDEXER_TYPE.descriptor,
+                signature = null,
+                value = null,
+                block = FieldVisitor::visitEnd,
             )
 
             visitMethod(
-                Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL,
-                "invoke",
-                getMethodDescriptor(tType, MAP_TYPE),
-                "(L${MAP_TYPE.internalName}<${SYMBOL_TYPE.descriptor}+${tType.descriptor}>;)${tType.descriptor}",
+                ACC_PUBLIC,
+                "getIndexer",
+                getMethodDescriptor(SYMBOL_INDEXER_TYPE),
+                null,
                 null,
             ).instructionAdapter {
-                invokeMethodVisitor = this
                 visitCode()
-                val preparingVariables = label()
-                visitVariables(target)
-                val expressionResult = label()
-                visitExpression(target)
-                box()
-                areturn(tType)
+                val start = label()
+                load(0, classType)
+                getfield(classType.internalName, "indexer", SYMBOL_INDEXER_TYPE.descriptor)
+                areturn(SYMBOL_INDEXER_TYPE)
                 val end = label()
 
                 visitLocalVariable(
                     "this",
                     classType.descriptor,
                     null,
-                    preparingVariables,
+                    start,
+                    end,
+                    0,
+                )
+
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+
+            visitMethod(
+                ACC_PUBLIC,
+                "invoke",
+                getMethodDescriptor(tTypePrimitive, tTypePrimitiveArray),
+                null,
+                null,
+            ).instructionAdapter {
+                invokeMethodVisitor = this
+                visitCode()
+                val start = label()
+                visitVariables(target, arrayMode = true)
+                visitExpression(target)
+                areturn(tTypePrimitive)
+                val end = label()
+
+                visitLocalVariable(
+                    "this",
+                    classType.descriptor,
+                    null,
+                    start,
                     end,
                     0,
                 )
 
                 visitLocalVariable(
                     "arguments",
-                    MAP_TYPE.descriptor,
-                    "L${MAP_TYPE.internalName}<${SYMBOL_TYPE.descriptor}+${tType.descriptor}>;",
-                    preparingVariables,
+                    tTypePrimitiveArray.descriptor,
+                    null,
+                    start,
                     end,
                     1,
                 )
@@ -110,7 +156,45 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
             }
 
             visitMethod(
-                Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL or Opcodes.ACC_BRIDGE or Opcodes.ACC_SYNTHETIC,
+                ACC_PUBLIC or ACC_FINAL,
+                "invoke",
+                getMethodDescriptor(tType, MAP_TYPE),
+                "(L${MAP_TYPE.internalName}<${SYMBOL_TYPE.descriptor}+${tType.descriptor}>;)${tType.descriptor}",
+                null,
+            ).instructionAdapter {
+                invokeMethodVisitor = this
+                visitCode()
+                val start = label()
+                visitVariables(target, arrayMode = false)
+                visitExpression(target)
+                box()
+                areturn(tType)
+                val end = label()
+
+                visitLocalVariable(
+                    "this",
+                    classType.descriptor,
+                    null,
+                    start,
+                    end,
+                    0,
+                )
+
+                visitLocalVariable(
+                    "arguments",
+                    MAP_TYPE.descriptor,
+                    "L${MAP_TYPE.internalName}<${SYMBOL_TYPE.descriptor}+${tType.descriptor}>;",
+                    start,
+                    end,
+                    1,
+                )
+
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+
+            visitMethod(
+                ACC_PUBLIC or ACC_FINAL or ACC_BRIDGE or ACC_SYNTHETIC,
                 "invoke",
                 getMethodDescriptor(OBJECT_TYPE, MAP_TYPE),
                 null,
@@ -138,21 +222,22 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
             }
 
             visitMethod(
-                Opcodes.ACC_PUBLIC,
+                ACC_PUBLIC or ACC_SYNTHETIC,
                 "<init>",
-                getMethodDescriptor(VOID_TYPE),
+                getMethodDescriptor(VOID_TYPE, SYMBOL_INDEXER_TYPE),
                 null,
                 null,
             ).instructionAdapter {
                 val start = label()
                 load(0, classType)
                 invokespecial(OBJECT_TYPE.internalName, "<init>", getMethodDescriptor(VOID_TYPE), false)
-                label()
                 load(0, classType)
-                label()
-                visitInsn(Opcodes.RETURN)
+                load(1, SYMBOL_INDEXER_TYPE)
+                putfield(classType.internalName, "indexer", SYMBOL_INDEXER_TYPE.descriptor)
+                areturn(VOID_TYPE)
                 val end = label()
                 visitLocalVariable("this", classType.descriptor, null, start, end, 0)
+                visitLocalVariable("indexer", SYMBOL_INDEXER_TYPE.descriptor, null, start, end, 1)
                 visitMaxs(0, 0)
                 visitEnd()
             }
@@ -166,12 +251,14 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
         if (System.getProperty("space.kscience.kmath.ast.dump.generated.classes") == "1")
             Paths.get("${className.split('.').last()}.class").writeBytes(binary)
 
-        MethodHandles.publicLookup().findConstructor(cls, MethodType.methodType(Void.TYPE))() as Expression<T>
+        MethodHandles
+            .publicLookup()
+            .findConstructor(cls, MethodType.methodType(Void.TYPE, SymbolIndexer::class.java))
+            .invoke(SimpleSymbolIndexer(argumentsLocals)) as E
     }
 
     /**
-     * Either loads a numeric constant [value] from the class's constants field or boxes a primitive
-     * constant from the constant pool.
+     * Loads a numeric constant [value] from the class's constants.
      */
     fun loadNumberConstant(value: Number) {
         when (tTypePrimitive) {
@@ -185,22 +272,10 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
     }
 
     /**
-     * Stores value variable [name] into a local. Should be called within [variablesPrepareCallback] before using
-     * [loadVariable].
+     * Stores value variable [name] into a local. Should be called before using [loadVariable]. Should be called only
+     * once for a variable.
      */
-    fun prepareVariable(name: String): Unit = invokeMethodVisitor.run {
-        if (name in argumentsLocals) return@run
-        load(1, MAP_TYPE)
-        aconst(name)
-
-        invokestatic(
-            MAP_INTRINSICS_TYPE.internalName,
-            "getOrFail",
-            getMethodDescriptor(OBJECT_TYPE, MAP_TYPE, STRING_TYPE),
-            false,
-        )
-
-        checkcast(tType)
+    fun prepareVariable(name: Symbol, arrayMode: Boolean): Unit = invokeMethodVisitor.run {
         var idx = argumentsLocals.indexOf(name)
 
         if (idx == -1) {
@@ -208,15 +283,33 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
             idx = argumentsLocals.lastIndex
         }
 
-        unbox()
-        store(2 + idx, tTypePrimitive)
+        if (arrayMode) {
+            load(1, tTypePrimitiveArray)
+            iconst(idx)
+            aload(tTypePrimitive)
+            store(2 + idx, tTypePrimitive)
+        } else {
+            load(1, MAP_TYPE)
+            aconst(name.identity)
+
+            invokestatic(
+                MAP_INTRINSICS_TYPE.internalName,
+                "getOrFail",
+                getMethodDescriptor(OBJECT_TYPE, MAP_TYPE, STRING_TYPE),
+                false,
+            )
+
+            checkcast(tType)
+            unbox()
+            store(2 + idx, tTypePrimitive)
+        }
     }
 
     /**
      * Loads a variable [name] from arguments [Map] parameter of [Expression.invoke]. The variable should be stored
      * with [prepareVariable] first.
      */
-    fun loadVariable(name: String): Unit = invokeMethodVisitor.load(2 + argumentsLocals.indexOf(name), tTypePrimitive)
+    fun loadVariable(name: Symbol): Unit = invokeMethodVisitor.load(2 + argumentsLocals.indexOf(name), tTypePrimitive)
 
     private fun unbox() = invokeMethodVisitor.run {
         invokevirtual(
@@ -231,20 +324,32 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
         invokestatic(tType.internalName, "valueOf", getMethodDescriptor(tType, tTypePrimitive), false)
     }
 
-    protected fun visitVariables(node: MST): Unit = when (node) {
-        is Symbol -> prepareVariable(node.identity)
-        is MST.Unary -> visitVariables(node.value)
+    private fun visitVariables(
+        node: MST,
+        arrayMode: Boolean,
+        alreadyLoaded: MutableList<Symbol> = mutableListOf()
+    ): Unit = when (node) {
+        is Symbol -> when (node) {
+            !in alreadyLoaded -> {
+                alreadyLoaded += node
+                prepareVariable(node, arrayMode)
+            }
+            else -> {
+            }
+        }
+
+        is MST.Unary -> visitVariables(node.value, arrayMode, alreadyLoaded)
 
         is MST.Binary -> {
-            visitVariables(node.left)
-            visitVariables(node.right)
+            visitVariables(node.left, arrayMode, alreadyLoaded)
+            visitVariables(node.right, arrayMode, alreadyLoaded)
         }
 
         else -> Unit
     }
 
-    protected fun visitExpression(mst: MST): Unit = when (mst) {
-        is Symbol -> loadVariable(mst.identity)
+    private fun visitExpression(mst: MST): Unit = when (mst) {
+        is Symbol -> loadVariable(mst)
         is MST.Numeric -> loadNumberConstant(mst.value)
 
         is MST.Unary -> when {
@@ -288,12 +393,23 @@ internal sealed class PrimitiveAsmBuilder<T : Number>(
         /**
          * ASM type for [java.lang.Number].
          */
-        val NUMBER_TYPE: Type by lazy { getObjectType("java/lang/Number") }
+        val NUMBER_TYPE: Type = getObjectType("java/lang/Number")
+
+        /**
+         * ASM type for [SymbolIndexer].
+         */
+        val SYMBOL_INDEXER_TYPE: Type = getObjectType("space/kscience/kmath/expressions/SymbolIndexer")
     }
 }
 
-internal class DoubleAsmBuilder(target: MST) :
-    PrimitiveAsmBuilder<Double>(DoubleField, java.lang.Double::class.java, java.lang.Double.TYPE, target) {
+@UnstableKMathAPI
+internal class DoubleAsmBuilder(target: MST) : PrimitiveAsmBuilder<Double, DoubleExpression>(
+    DoubleField,
+    java.lang.Double::class.java,
+    java.lang.Double.TYPE,
+    DoubleExpression::class.java,
+    target,
+) {
 
     private fun buildUnaryJavaMathCall(name: String) {
         invokeMethodVisitor.invokestatic(
@@ -326,7 +442,7 @@ internal class DoubleAsmBuilder(target: MST) :
         super.visitUnary(mst)
 
         when (mst.operation) {
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.DNEG)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(DNEG)
             GroupOps.PLUS_OPERATION -> Unit
             PowerOperations.SQRT_OPERATION -> buildUnaryJavaMathCall("sqrt")
             TrigonometricOperations.SIN_OPERATION -> buildUnaryJavaMathCall("sin")
@@ -351,28 +467,35 @@ internal class DoubleAsmBuilder(target: MST) :
         super.visitBinary(mst)
 
         when (mst.operation) {
-            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.DADD)
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.DSUB)
-            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.DMUL)
-            FieldOps.DIV_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.DDIV)
+            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(DADD)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(DSUB)
+            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(DMUL)
+            FieldOps.DIV_OPERATION -> invokeMethodVisitor.visitInsn(DDIV)
             PowerOperations.POW_OPERATION -> buildBinaryJavaMathCall("pow")
             else -> super.visitBinary(mst)
         }
     }
 
     companion object {
-        val MATH_TYPE: Type by lazy { getObjectType("java/lang/Math") }
-        val MATH_KT_TYPE: Type by lazy { getObjectType("kotlin/math/MathKt") }
+        val MATH_TYPE: Type = getObjectType("java/lang/Math")
+        val MATH_KT_TYPE: Type = getObjectType("kotlin/math/MathKt")
     }
 }
 
+@UnstableKMathAPI
 internal class IntAsmBuilder(target: MST) :
-    PrimitiveAsmBuilder<Int>(IntRing, Integer::class.java, Integer.TYPE, target) {
+    PrimitiveAsmBuilder<Int, IntExpression>(
+        IntRing,
+        Integer::class.java,
+        Integer.TYPE,
+        IntExpression::class.java,
+        target
+    ) {
     override fun visitUnary(mst: MST.Unary) {
         super.visitUnary(mst)
 
         when (mst.operation) {
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.INEG)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(INEG)
             GroupOps.PLUS_OPERATION -> Unit
             else -> super.visitUnary(mst)
         }
@@ -382,21 +505,27 @@ internal class IntAsmBuilder(target: MST) :
         super.visitBinary(mst)
 
         when (mst.operation) {
-            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.IADD)
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.ISUB)
-            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.IMUL)
+            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(IADD)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(ISUB)
+            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(IMUL)
             else -> super.visitBinary(mst)
         }
     }
 }
 
-internal class LongAsmBuilder(target: MST) :
-    PrimitiveAsmBuilder<Long>(LongRing, java.lang.Long::class.java, java.lang.Long.TYPE, target) {
+@UnstableKMathAPI
+internal class LongAsmBuilder(target: MST) : PrimitiveAsmBuilder<Long, LongExpression>(
+    LongRing,
+    java.lang.Long::class.java,
+    java.lang.Long.TYPE,
+    LongExpression::class.java,
+    target,
+) {
     override fun visitUnary(mst: MST.Unary) {
         super.visitUnary(mst)
 
         when (mst.operation) {
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.LNEG)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(LNEG)
             GroupOps.PLUS_OPERATION -> Unit
             else -> super.visitUnary(mst)
         }
@@ -406,11 +535,10 @@ internal class LongAsmBuilder(target: MST) :
         super.visitBinary(mst)
 
         when (mst.operation) {
-            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.LADD)
-            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.LSUB)
-            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(Opcodes.LMUL)
+            GroupOps.PLUS_OPERATION -> invokeMethodVisitor.visitInsn(LADD)
+            GroupOps.MINUS_OPERATION -> invokeMethodVisitor.visitInsn(LSUB)
+            RingOps.TIMES_OPERATION -> invokeMethodVisitor.visitInsn(LMUL)
             else -> super.visitBinary(mst)
         }
     }
 }
-
